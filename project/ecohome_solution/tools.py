@@ -51,8 +51,125 @@ def get_weather_forecast(location: str, days: int = 3) -> Dict[str, Any]:
         }
     """
     # Mock weather API or call OpenWeatherMap or similar
-    
-    return 
+
+
+    try:
+        # Basic validation
+        days = max(1, min(int(days), 7))
+
+        # Create a stable seed from location + date (keeps results consistent per day)
+        today = datetime.now().date()
+        seed_str = f"{location.lower().strip()}::{today.isoformat()}::{days}"
+        seed = sum(ord(c) for c in seed_str)
+        rng = random.Random(seed)
+
+        # Helper: map condition -> solar multiplier
+        def condition_solar_factor(cond: str) -> float:
+            return {
+                "sunny": 1.00,
+                "partly_cloudy": 0.70,
+                "cloudy": 0.35,
+                "rain": 0.20,
+            }.get(cond, 0.60)
+
+        # Helper: approximate solar curve (0 at night, peak midday)
+        # hour: 0-23 -> normalized 0..1
+        def solar_curve(hour: int) -> float:
+            # Daylight window roughly 6..18
+            if hour < 6 or hour > 18:
+                return 0.0
+            # Peak around noon (12)
+            # simple triangular curve: 6->0, 12->1, 18->0
+            if hour <= 12:
+                return (hour - 6) / 6.0
+            else:
+                return (18 - hour) / 6.0
+
+        # Base climate-ish values (mock)
+        base_temp = rng.randint(18, 32)
+        base_humidity = rng.randint(35, 75)
+        base_wind = round(rng.uniform(1.5, 7.5), 1)
+
+        # Choose a prevailing condition for "current", with some realism
+        current_condition = rng.choices(
+            population=["sunny", "partly_cloudy", "cloudy", "rain"],
+            weights=[45, 35, 15, 5],
+            k=1
+        )[0]
+
+        # Build a simple multi-day summary + next-24h hourly forecast
+        daily = []
+        for d in range(days):
+            day_date = today + timedelta(days=d)
+            # Slight temp drift day-to-day
+            drift = rng.randint(-2, 2)
+            day_condition = rng.choices(
+                population=["sunny", "partly_cloudy", "cloudy", "rain"],
+                weights=[45, 35, 15, 5],
+                k=1
+            )[0]
+            daily.append({
+                "date": day_date.isoformat(),
+                "high_temp_c": base_temp + drift + rng.randint(1, 4),
+                "low_temp_c": base_temp + drift - rng.randint(3, 6),
+                "condition": day_condition
+            })
+
+        # Hourly forecast for next 24 hours (for "today" context)
+        hourly = []
+        for hour in range(24):
+            # Temperature curve: cooler early morning, warmer afternoon
+            # peak around 15:00
+            # simple curve based on distance from 15
+            temp_variation = -abs(hour - 15) * 0.4 + rng.uniform(-0.6, 0.6)
+            temp_c = round(base_temp + temp_variation, 1)
+
+            # Condition can vary slightly hour-to-hour but follow prevailing
+            # Keep it stable-ish to avoid noisy results
+            if hour in (8, 12, 16, 20):
+                condition = rng.choices(
+                    population=["sunny", "partly_cloudy", "cloudy", "rain"],
+                    weights=[45, 35, 15, 5],
+                    k=1
+                )[0]
+            else:
+                condition = current_condition
+
+            # Solar irradiance: curve * condition factor + tiny noise
+            irradiance = solar_curve(hour) * condition_solar_factor(condition)
+            irradiance = max(0.0, min(1.0, irradiance + rng.uniform(-0.05, 0.05)))
+            irradiance = round(irradiance, 3)
+
+            humidity = int(max(20, min(90, base_humidity + rng.randint(-8, 8))))
+            wind_speed = round(max(0.0, base_wind + rng.uniform(-1.2, 1.2)), 1)
+
+            hourly.append({
+                "hour": hour,
+                "temperature_c": temp_c,
+                "condition": condition,
+                "solar_irradiance": irradiance,
+                "humidity": humidity,
+                "wind_speed": wind_speed
+            })
+
+        forecast = {
+            "location": location,
+            "forecast_days": days,
+            "current": {
+                "temperature_c": round(base_temp + rng.uniform(-1.5, 1.5), 1),
+                "condition": current_condition,
+                "humidity": base_humidity,
+                "wind_speed": base_wind
+            },
+            "daily": daily,
+            "hourly": hourly
+        }
+
+        return forecast
+
+    except Exception as e:
+        return {"error": f"Failed to get weather forecast: {str(e)}"}
+
 
 # TODO: Implement get_electricity_prices tool
 @tool
@@ -81,16 +198,71 @@ def get_electricity_prices(date: str = None) -> Dict[str, Any]:
             ]
         }
     """
-    if date is None:
-        date = datetime.now().strftime("%Y-%m-%d")
-    
     # Mock electricity pricing - in real implementation, this would call a pricing API
     # Use a base price per kWh    
     # Then generate hourly rates with peak/off-peak pricing
     # Peak normally between 6 and 22...
     # demand_charge should be 0 if off-peak
+    try:
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
 
-    return 
+        # Validate/parse date
+        day = datetime.strptime(date, "%Y-%m-%d").date()
+
+        # Stable seed per date so pricing doesn't change randomly between runs
+        seed_str = f"pricing::{day.isoformat()}"
+        seed = sum(ord(c) for c in seed_str)
+        rng = random.Random(seed)
+
+        # Base price per kWh (mock)
+        base_price = round(rng.uniform(0.10, 0.16), 3)
+
+        # Define time-of-use windows (as per your comment: Peak between 6 and 22)
+        # We'll add finer categories for better recommendations:
+        # - off_peak: 22-6 (low)
+        # - mid_peak: 6-16 and 20-22 (medium)
+        # - peak: 16-20 (highest) but still within 6-22
+        def rate_for_hour(h: int) -> Dict[str, Any]:
+            if h < 6 or h >= 22:
+                period = "off_peak"
+                multiplier = rng.uniform(0.70, 0.85)
+                demand_charge = 0.0
+            elif 16 <= h < 20:
+                period = "peak"
+                multiplier = rng.uniform(1.45, 1.70)
+                demand_charge = round(rng.uniform(0.03, 0.08), 3)  # non-zero at peak
+            else:
+                period = "mid_peak"
+                multiplier = rng.uniform(1.00, 1.25)
+                demand_charge = round(rng.uniform(0.01, 0.03), 3)  # small non-zero
+
+            rate = round(base_price * multiplier, 3)
+            return {"rate": rate, "period": period, "demand_charge": demand_charge}
+
+        hourly_rates = []
+        for hour in range(24):
+            r = rate_for_hour(hour)
+            hourly_rates.append({
+                "hour": hour,
+                "rate": r["rate"],
+                "period": r["period"],
+                "demand_charge": r["demand_charge"]
+            })
+
+        prices = {
+            "date": date,
+            "pricing_type": "time_of_use",
+            "currency": "USD",
+            "unit": "per_kWh",
+            "base_rate": base_price,
+            "hourly_rates": hourly_rates
+        }
+
+        return prices
+
+    except Exception as e:
+        return {"error": f"Failed to get electricity prices: {str(e)}"}
 
 @tool
 def query_energy_usage(start_date: str, end_date: str, device_type: str = None) -> Dict[str, Any]:
